@@ -1,0 +1,77 @@
+name: Probe voice assets (facts only, no APK)
+
+# Upload as .github/workflows/probe-voice.yml, then Actions > Probe voice assets > Run workflow.
+# It changes NOTHING in the app. It only prints facts into the run summary so the real build can be written from facts, not guesses.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 1. Do the model bundles exist? (HTTP status + size)
+        run: |
+          B=https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models
+          {
+            echo "### 1. Model bundle URLs (k2-fsa tts-models release)"
+            echo '```'
+            for m in vits-piper-hi_IN-priyamvada-medium vits-piper-hi_IN-pratham-medium vits-piper-hi_IN-rohan-medium \
+                     vits-piper-en_US-amy-medium vits-piper-en_US-lessac-medium vits-piper-en_US-libritts_r-medium vits-piper-en_IN-cmu_indic-medium; do
+              r=$(curl -sIL -o /dev/null -w '%{http_code} %{size_download}' "$B/$m.tar.bz2")
+              l=$(curl -sIL "$B/$m.tar.bz2" | grep -i '^content-length' | tail -1 | tr -d '\r')
+              echo "$m -> HTTP ${r%% *}  $l"
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 2. Download Hindi bundle and list its real contents
+        run: |
+          B=https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models
+          curl -fL -o hi.tar.bz2 "$B/vits-piper-hi_IN-priyamvada-medium.tar.bz2" || { echo "Hindi bundle download FAILED" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
+          mkdir hi && tar xjf hi.tar.bz2 -C hi
+          {
+            echo "### 2. Hindi bundle contents"
+            echo '```'
+            ls -lh hi/*/ | head -30
+            du -sh hi/*/espeak-ng-data 2>/dev/null
+            sha256sum hi.tar.bz2
+            echo '--- tokens.txt (first 12 lines)'; head -12 hi/*/tokens.txt
+            echo '--- onnx.json (if present)'; cat hi/*/*.onnx.json 2>/dev/null | head -c 600
+            echo '--- MODEL_CARD / README (if present)'; cat hi/*/MODEL_CARD hi/*/README* 2>/dev/null | head -40
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 3. Latest sherpa-onnx release assets (Android / WASM)
+        run: |
+          curl -fsSL https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/latest -o rel.json || { echo "release API failed" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "### 3. sherpa-onnx latest release"
+            echo '```'
+            node -e "const r=require('./rel.json');console.log(r.tag_name);r.assets.filter(a=>/android|aar|jniLibs|wasm/i.test(a.name)).forEach(a=>console.log(a.name,(a.size/1e6).toFixed(1)+'MB'))"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 4. Is sherpa-onnx on Maven Central / JitPack? (Gradle dependency route)
+        run: |
+          {
+            echo "### 4. Maven / npm facts"
+            echo '```'
+            curl -s -o /dev/null -w 'maven central search HTTP %{http_code}\n' 'https://search.maven.org/solrsearch/select?q=g:com.k2fsa.sherpa.onnx&rows=5&wt=json'
+            curl -s 'https://search.maven.org/solrsearch/select?q=g:com.k2fsa.sherpa.onnx&rows=5&wt=json' | head -c 800; echo
+            echo '--- piper-tts-web peer deps'
+            npm view @mintplex-labs/piper-tts-web@1.0.4 dependencies peerDependencies --json 2>&1 | head -30
+            echo '--- onnxruntime-web latest'
+            npm view onnxruntime-web version
+            echo '--- Capacitor TTS plugin java level'
+            npm view @capacitor-community/text-to-speech@6.0.0 version peerDependencies --json 2>&1 | head -10
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
