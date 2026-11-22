@@ -1,0 +1,96 @@
+name: Probe voice assets 2 (AAR API + Android template, no APK)
+
+# Upload as .github/workflows/probe-voice2.yml, run it, copy the run Summary page back to Claude.
+# Changes nothing in the app. Uses the same repo files and steps as build-apk.yml so the facts match the real build.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: A. Which text-to-speech / speech-recognition plugin versions match Capacitor 6?
+        run: |
+          {
+            echo "### A. Plugin versions vs Capacitor"
+            echo '```'
+            for p in @capacitor-community/text-to-speech @capacitor-community/speech-recognition; do
+              echo "== $p"
+              for v in $(npm view $p versions --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{JSON.parse(s).filter(v=>!/-/.test(v)).slice(-6).forEach(v=>console.log(v))})"); do
+                echo -n "$v  peer: "; npm view $p@$v peerDependencies --json | tr -d '\n '; echo
+              done
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: B. sherpa-onnx AAR - download and inspect real API
+        run: |
+          set +e
+          R=https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3
+          for a in sherpa-onnx-2.0.3 sherpa-onnx-static-link-onnxruntime-2.0.3; do
+            curl -fL -o $a.aar "$R/$a.aar" || echo "DOWNLOAD FAILED: $a" | tee -a "$GITHUB_STEP_SUMMARY"
+            mkdir -p x/$a && unzip -q -o $a.aar -d x/$a
+          done
+          {
+            echo "### B. AAR contents"
+            for a in sherpa-onnx-2.0.3 sherpa-onnx-static-link-onnxruntime-2.0.3; do
+              echo "#### $a"
+              echo '```'
+              ls -l $a.aar
+              echo "--- top level"; ls x/$a
+              echo "--- jni (abi / file / size)"; find x/$a/jni -type f -exec ls -l {} \; 2>/dev/null | awk '{print $5, $9}'
+              echo "--- AndroidManifest.xml"; cat x/$a/AndroidManifest.xml
+              echo "--- tts related classes"; unzip -l x/$a/classes.jar | grep -i "tts\|GeneratedAudio" | awk '{print $4}'
+              echo '```'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### B2. javap signatures (sherpa-onnx-2.0.3.aar)"
+            echo '```'
+            cd x/sherpa-onnx-2.0.3
+            for c in OfflineTts OfflineTtsConfig OfflineTtsModelConfig OfflineTtsVitsModelConfig GeneratedAudio; do
+              echo "=== $c"; javap -p -cp classes.jar com.k2fsa.sherpa.onnx.$c 2>&1 | head -60
+            done
+            echo "--- does the AAR need kotlin runtime?"
+            javap -p -c -cp classes.jar com.k2fsa.sherpa.onnx.OfflineTts 2>&1 | grep -c "kotlin/" 
+            echo "--- native lib loaded"
+            javap -p -c -cp classes.jar com.k2fsa.sherpa.onnx.OfflineTts 2>&1 | grep -i "loadLibrary\|ldc" | head -8
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: C. Generate the real Capacitor 6 Android project and print its template files
+        run: |
+          set +e
+          [ -f capacitor.config.json ] || mv capacitor_config.json capacitor.config.json
+          mkdir -p www && cp index.html www/
+          npm install --no-audit --no-fund --legacy-peer-deps > npm.log 2>&1; tail -3 npm.log
+          npx cap add android > cap.log 2>&1; tail -5 cap.log
+          {
+            echo "### C. Generated Android project"
+            echo '```'
+            echo "--- android tree (java/kotlin, gradle files)"
+            find android -maxdepth 6 \( -name "*.gradle" -o -name "*.properties" -o -name "MainActivity*" -o -name "variables.gradle" \) -not -path "*/node_modules/*" | sort
+            echo "--- gradle-wrapper.properties"; cat android/gradle/wrapper/gradle-wrapper.properties
+            echo "--- android/build.gradle"; cat android/build.gradle
+            echo "--- android/variables.gradle"; cat android/variables.gradle
+            echo "--- android/app/build.gradle"; cat android/app/build.gradle
+            echo "--- MainActivity"; cat $(find android -name "MainActivity.*" | head -1)
+            echo "--- AndroidManifest.xml"; cat android/app/src/main/AndroidManifest.xml
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
